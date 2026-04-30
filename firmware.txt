@@ -1,0 +1,129 @@
+use laptop camera intead of esp for tomoroow
+
+
+
+
+#include <Wire.h>
+#include <Adafruit_MPU6050.h>
+#include <Adafruit_Sensor.h>
+#include <math.h>
+
+// --- Pin Definitions (Same as original) ---
+#define BUZZER_PIN 25    // Active buzzer via 100 ohm resistor
+#define SOS_PIN 26       // SOS LED via 220 ohm resistor
+#define MQ135_PIN 34     // MQ-135 AOUT (Analog Input)[cite: 2]
+
+// --- Thresholds ---
+#define MPU_TILT_THRESHOLD 25.0f 
+#define MQ135_WARN_ADC 600      
+#define ALERT_DURATION_MS 3000   
+#define SENSOR_READ_INTERVAL 500 
+
+// Objects
+Adafruit_MPU6050 mpu;
+
+// State flags
+bool camDrowsy = false;   // Now received via main USB Serial[cite: 2]
+bool mpuDrowsy = false;   
+bool airDrowsy = false;   
+bool alertActive = false;
+unsigned long alertStart = 0;
+unsigned long lastSensorMs = 0;
+
+// Calibration offsets
+float calPitch = 0.0f, calRoll = 0.0f;
+
+void calibrateMPU(int samples = 150) {
+    float sumP = 0, sumR = 0;
+    sensors_event_t a, g, t;
+    Serial.println("Calibrating MPU-6050... Keep it level.");
+    for (int i = 0; i < samples; i++) {
+        mpu.getEvent(&a, &g, &t);
+        sumP += atan2(a.acceleration.y, a.acceleration.z) * 180.0f / PI;
+        sumR += atan2(a.acceleration.x, a.acceleration.z) * 180.0f / PI;
+        delay(5);
+    }
+    calPitch = sumP / samples;
+    calRoll = sumR / samples;
+    Serial.printf("MPU Calibrated. Pitch Offset: %.2f, Roll Offset: %.2f\n", calPitch, calRoll);
+}
+
+bool checkMPUTilt() {
+    sensors_event_t a, g, temp;
+    mpu.getEvent(&a, &g, &temp);
+    float pitch = (atan2(a.acceleration.y, a.acceleration.z) * 180.0f / PI) - calPitch;
+    float roll = (atan2(a.acceleration.x, a.acceleration.z) * 180.0f / PI) - calRoll;
+    float tilt = sqrt(pitch * pitch + roll * roll);
+    return (tilt > MPU_TILT_THRESHOLD);
+}
+
+bool checkAirQuality() {
+    int raw = analogRead(MQ135_PIN); // Reading from GPIO34[cite: 2]
+    return (raw > MQ135_WARN_ADC);
+}
+
+void fusionDecision() {
+    // Alert triggers if 2 or more sensors detect drowsiness[cite: 2]
+    int score = (int)camDrowsy + (int)mpuDrowsy + (int)airDrowsy;
+    
+    if (score >= 2) {
+        if (!alertActive) {
+            digitalWrite(BUZZER_PIN, HIGH);
+            digitalWrite(SOS_PIN, HIGH);
+            alertStart = millis();
+            alertActive = true;
+            Serial.println(">>> ALERT: DROWSINESS DETECTED <<<");
+        }
+    } else {
+        if (alertActive && (millis() - alertStart > ALERT_DURATION_MS)) {
+            digitalWrite(BUZZER_PIN, LOW);
+            digitalWrite(SOS_PIN, LOW);
+            alertActive = false;
+            Serial.println("Status: Awake / Normal");
+        }
+    }
+}
+
+void setup() {
+    // Primary Serial for BOTH Debug and Laptop Data[cite: 2]
+    Serial.begin(115200); 
+    
+    Wire.begin(21, 22); // I2C Pins: SDA=21, SCL=22[cite: 2]
+    
+    pinMode(BUZZER_PIN, OUTPUT);
+    pinMode(SOS_PIN, OUTPUT);
+    digitalWrite(BUZZER_PIN, LOW);
+    digitalWrite(SOS_PIN, LOW);
+
+    if (!mpu.begin()) {
+        Serial.println("Error: MPU-6050 not found!");
+        while (1) yield();
+    }
+    
+    calibrateMPU();
+    Serial.println("System Initialized. Waiting for Laptop Eye Tracking...");
+}
+
+void loop() {
+    // Read Eye Detection data from the USB cable[cite: 2]
+    while (Serial.available()) {
+        String msg = Serial.readStringUntil('\n');
+        msg.trim();
+        if (msg == "DROWSY") {
+            camDrowsy = true;
+        } else if (msg == "AWAKE") {
+            camDrowsy = false;
+        }
+    }
+
+    // Physical sensor checks
+    if (millis() - lastSensorMs > SENSOR_READ_INTERVAL) {
+        mpuDrowsy = checkMPUTilt();
+        airDrowsy = checkAirQuality();
+        lastSensorMs = millis();
+    }
+
+    fusionDecision();
+    delay(10); 
+}
+
